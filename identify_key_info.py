@@ -206,10 +206,15 @@ if __name__ == "__main__":
         print("Error: Failed to initialize OpenAI client. Is your OPENAI_API_KEY environment variable set?")
         exit()
 
+    # Define the output directory
+    OUTPUT_DIR = "summaries"
+    # Create the output directory if it doesn't exist
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     # --- 2. Input from YouTube ---
-    youtube_url = "https://www.youtube.com/watch?v=t-53fouKqWI"
+    youtube_url = input("Please enter the YouTube URL: ")
     print(f"--- Step 1: Fetching Transcript from YouTube URL ---")
-    print(f"URL: {youtube_url}")
+    # print(f"URL: {youtube_url}")
     
     # Fetch the video title using pytube
     # try:
@@ -253,7 +258,7 @@ if __name__ == "__main__":
         
         # Generate a unique filename for the output file
         video_id = get_video_id(youtube_url)
-        output_filename = f"{video_id}.md"
+        output_filename = os.path.join(OUTPUT_DIR, f"{video_id}.md")
         # if video_title:
         #     sanitized_title = sanitize_filename(video_title)
         #     output_filename = f"{sanitized_title}.md"
@@ -301,7 +306,6 @@ if __name__ == "__main__":
                 with open(output_filename, 'a', encoding='utf-8') as f:
                     f.write("\n\n---\n")
                     f.write("## Part 2: Final Summary (Abstractive with Citations)\n")
-                    f.write("This is a human-readable synthesis of the key sentences listed above. Each sentence includes citations that trace back to the original text.\n\n")
                     f.write(final_summary)
                 print(f"✅ Abstractive summary successfully appended to: '{output_filename}'")
             except IOError as e:
