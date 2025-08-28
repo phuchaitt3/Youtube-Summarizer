@@ -1,8 +1,5 @@
 # transcript_fetcher.py
 
-# First, ensure the library is installed:
-# pip install youtube-transcript-api
-
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 import re

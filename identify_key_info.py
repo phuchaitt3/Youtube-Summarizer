@@ -4,8 +4,10 @@ import os
 import json
 import nltk
 from openai import OpenAI
-from transcript_fetcher import get_youtube_transcript # <-- IMPORT THE FUNCTION
+from transcript_fetcher import get_youtube_transcript
+from transcript_fetcher import get_video_id
 from dotenv import load_dotenv
+# from pytube import YouTube
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,6 +41,30 @@ def preprocess_text_to_numbered_sentences(raw_text: str) -> tuple[dict[str, str]
         formatted_text_lines.append(f"[{sentence_id}] {sentence}")
         
     return numbered_sentences_map, "\n".join(formatted_text_lines)
+
+def determine_sentence_count(total_sentences: int) -> int:
+    """
+    Dynamically determines the number of key sentences to extract based on the
+    total length of the transcript.
+
+    Args:
+        total_sentences: The total number of sentences in the text.
+
+    Returns:
+        The ideal number of sentences for the summary.
+    """
+    # --- Tunable Parameters ---
+    MIN_SENTENCES = 7      # The absolute minimum sentences for any summary.
+    MAX_SENTENCES = 40     # The absolute maximum sentences for any summary.
+    RATIO = 0.15           # We'll aim for about 15% of the total sentences.
+
+    # Calculate the proportional count
+    proportional_count = int(total_sentences * RATIO)
+    
+    # Enforce the min and max caps
+    final_count = max(MIN_SENTENCES, min(proportional_count, MAX_SENTENCES))
+    
+    return final_count
 
 def extract_key_sentence_ids(
     formatted_text: str,
@@ -99,6 +125,76 @@ def extract_key_sentence_ids(
         print(f"An unexpected error occurred: {e}")
         return []
 
+def generate_abstractive_summary(
+    key_sentences: list[str],
+    client: OpenAI,
+    model: str = "gpt-4.1-nano"
+) -> str:
+    """
+    Generates a final, abstractive summary from a list of key sentences,
+    ensuring every new sentence includes citations to the original source sentences.
+
+    Args:
+        key_sentences: A list of the key sentences, formatted with their IDs.
+        client: An initialized OpenAI client.
+        model: The OpenAI model to use.
+
+    Returns:
+        A string containing the final, cited summary, or an empty string on error.
+    """
+    # Join the list of key sentences into a single block of text for the prompt
+    key_sentences_text = "\n".join(key_sentences)
+
+    prompt = f"""
+    You are a skilled writer and editor. Your task is to synthesize the following collection of key transcribed sentences from a video into a smooth, easy-to-read summary paragraph.
+
+    **CRITICAL INSTRUCTIONS:**
+    1.  You MUST base your summary ONLY on the information provided in the "Key Sentences to Rewrite" below. Do not add any outside knowledge or information.
+    2.  At the end of EACH new sentence you write in your summary, you MUST cite the original sentence number(s) it is based on, like `[S1]` or `[S5, S12]`.
+    3.  Every claim in your summary must be traceable to one or more of the provided sentences.
+    4.  Combine related ideas into cohesive sentences to ensure the summary flows naturally.
+
+    **Key Sentences to Rewrite:**
+    ---
+    {key_sentences_text}
+    ---
+
+    **Final Summary:**
+    """
+
+    try:
+        print(f"\nSending request to '{model}' to generate the final abstractive summary...")
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a skilled writer who follows citation rules perfectly."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5 # A little creativity is good for writing style, but not too much
+        )
+        
+        summary = response.choices[0].message.content
+        print("Successfully received summary from API.")
+        return summary.strip()
+
+    except Exception as e:
+        print(f"An unexpected error occurred during final summary generation: {e}")
+        return ""
+
+def sanitize_filename(title: str) -> str:
+    """
+    Cleans a string to be a valid filename.
+    - Removes illegal characters
+    - Replaces spaces with underscores
+    - Truncates to a reasonable length
+    """
+    # Remove characters that are illegal in most file systems
+    sanitized = re.sub(r'[\\/*?:"<>|]', "", title)
+    # Replace spaces with underscores
+    sanitized = sanitized.replace(" ", "_")
+    # Truncate the filename to avoid issues with path length limits
+    return sanitized[:100] # Keep the first 100 characters
+
 if __name__ == "__main__":
     # --- 1. Setup ---
     download_nltk_data_if_needed()
@@ -115,6 +211,15 @@ if __name__ == "__main__":
     print(f"--- Step 1: Fetching Transcript from YouTube URL ---")
     print(f"URL: {youtube_url}")
     
+    # Fetch the video title using pytube
+    # try:
+    #     yt = YouTube(youtube_url)
+    #     video_title = yt.title
+    #     print(f"Successfully fetched video title: \"{video_title}\"")
+    # except Exception as e:
+    #     print(f"Warning: Could not fetch video title: {e}. Using video ID as a fallback.")
+    #     video_title = "" # Fallback to an empty title
+    
     long_text = get_youtube_transcript(youtube_url)
     
     # Check if the transcript fetcher returned an error
@@ -127,28 +232,79 @@ if __name__ == "__main__":
     # --- 3. Pre-process the fetched text ---
     print("\n--- Step 2: Pre-processing Text ---")
     sentences_map, formatted_prompt_text = preprocess_text_to_numbered_sentences(long_text)
+    total_sentence_count = len(sentences_map) # Get the total number of sentences
     print(f"Successfully split text into {len(sentences_map)} sentences.")
     
-    # --- 4. Identify Key Sentences using LLM ---
-    print("\n--- Step 3: Extracting Key Sentence IDs with OpenAI ---")
-    key_sentence_ids = extract_key_sentence_ids(formatted_prompt_text, client, sentence_count=15) # Increased count for a long video
+    # --- 4. Dynamically Determine the Count ---  <- NEW STEP
+    dynamic_count = determine_sentence_count(total_sentence_count)
+    print(f"Dynamically determined summary sentence count: {dynamic_count}")
     
+    # --- 5. Identify Key Sentences using LLM ---
+    print("\n--- Step 3: Extracting Key Sentence IDs with OpenAI ---")
+    key_sentence_ids = extract_key_sentence_ids(formatted_prompt_text, client, sentence_count=dynamic_count)
+
     if not key_sentence_ids:
         print("\nCould not extract key sentences. Exiting.")
     else:
         print(f"\nIdentified {len(key_sentence_ids)} key sentence IDs: {key_sentence_ids}")
         
-        # --- 5. Verification Step (Crucial for the workflow) ---
+        # --- 6. Verification Step (Crucial for the workflow) ---
         print("\n--- Step 4: Verifying and Displaying Key Sentences ---")
-        print("This is the 'extractive' summary that will be used as the basis for the final step.")
         
+        # Generate a unique filename for the output file
+        video_id = get_video_id(youtube_url)
+        output_filename = f"{video_id}.md"
+        # if video_title:
+        #     sanitized_title = sanitize_filename(video_title)
+        #     output_filename = f"{sanitized_title}.md"
+        # else:
+        #     # Fallback to just the ID if the title could not be fetched
+        #     output_filename = f"error_no_title.md"
+
+        # Prepare the content for the Markdown file
+        markdown_content = []
+        markdown_content.append(f"# Extractive Summary for YouTube Video\n")
+        markdown_content.append(f"**Source URL:** {youtube_url}\n")
+        markdown_content.append("---")
+        markdown_content.append("\nBelow are the most important sentences identified from the transcript. These sentences form the basis for the final abstractive summary.\n")
+
         key_sentences_to_summarize = []
         for sentence_id in key_sentence_ids:
             if sentence_id in sentences_map:
                 sentence_text = sentences_map[sentence_id]
-                print(f"  - [{sentence_id}] {sentence_text}")
+                # Format as a Markdown list item with the ID bolded
+                markdown_content.append(f"* **`{sentence_id}`**: {sentence_text}")
                 key_sentences_to_summarize.append(f"[{sentence_id}] {sentence_text}")
             else:
+                # Still print warnings to the terminal if an ID is invalid
                 print(f"  - Warning: Received an invalid sentence ID from the API: {sentence_id}")
+        
+        # Join all the parts into a single string
+        final_markdown = "\n".join(markdown_content)
 
-        print("\nThis workflow is now ready for the final 'Generate Abstractive Summary' step.")
+        # Save the formatted content to the Markdown file
+        try:
+            with open(output_filename, 'w', encoding='utf-8') as f:
+                f.write(final_markdown)
+            print(f"\n✅ Extractive summary successfully saved to: '{output_filename}'")
+        except IOError as e:
+            print(f"\n❌ Error saving file: {e}")
+
+        # --- Step 5: Generate and Append Final Abstractive Summary ---
+        print("\n--- Step 5: Generating and Appending Final Abstractive Summary ---")
+        
+        final_summary = generate_abstractive_summary(key_sentences_to_summarize, client)
+        
+        if final_summary:
+            # Append the final summary to the SAME file
+            try:
+                with open(output_filename, 'a', encoding='utf-8') as f:
+                    f.write("\n\n---\n")
+                    f.write("## Part 2: Final Summary (Abstractive with Citations)\n")
+                    f.write("This is a human-readable synthesis of the key sentences listed above. Each sentence includes citations that trace back to the original text.\n\n")
+                    f.write(final_summary)
+                print(f"✅ Abstractive summary successfully appended to: '{output_filename}'")
+            except IOError as e:
+                print(f"\n❌ Error appending final summary to file: {e}")
+        else:
+            print("\nCould not generate the final abstractive summary.")
